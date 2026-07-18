@@ -1,0 +1,191 @@
+// Restaurant POS & Kitchen Management System — "Eezy POS"
+// Full domain schema for the 3-role flow: Admin, Receptionist, Kitchen.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Staff roles. Customers never authenticate into this system.
+enum Role {
+  ADMIN
+  RECEPTIONIST
+  KITCHEN
+}
+
+enum MenuCategoryType {
+  STARTERS
+  MAIN_COURSE
+  DRINKS
+  DESSERTS
+}
+
+enum FoodType {
+  VEG
+  NON_VEG
+}
+
+enum TableStatus {
+  AVAILABLE
+  OCCUPIED
+  RESERVED
+}
+
+/// Order lifecycle. KITCHEN staff drive ACCEPTED -> COOKING -> READY.
+/// RECEPTIONIST/ADMIN drive SERVED -> COMPLETED (after billing).
+enum OrderStatus {
+  PENDING
+  ACCEPTED
+  COOKING
+  READY
+  SERVED
+  COMPLETED
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  passwordHash String
+  role         Role
+  isActive     Boolean   @default(true)
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  ordersCreated Order[]        @relation("OrdersCreatedBy")
+  refreshTokens RefreshToken[]
+
+  @@index([role])
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Category {
+  id        String           @id @default(cuid())
+  name      String           @unique
+  type      MenuCategoryType
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  menuItems MenuItem[]
+}
+
+model MenuItem {
+  id              String   @id @default(cuid())
+  name            String
+  description     String?
+  imageUrl        String?
+  price           Decimal  @db.Decimal(10, 2)
+  preparationTime Int // minutes
+  foodType        FoodType
+  isAvailable     Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  categoryId String
+  category   Category @relation(fields: [categoryId], references: [id])
+
+  orderItems OrderItem[]
+
+  @@index([categoryId])
+  @@index([isAvailable])
+}
+
+model RestaurantTable {
+  id        String      @id @default(cuid())
+  number    Int         @unique
+  capacity  Int
+  status    TableStatus @default(AVAILABLE)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  orders Order[]
+
+  @@index([status])
+}
+
+model Order {
+  id          String      @id @default(cuid())
+  orderNumber Int         @unique @default(autoincrement())
+  status      OrderStatus @default(PENDING)
+  notes       String?
+
+  subtotal   Decimal @default(0) @db.Decimal(10, 2)
+  taxAmount  Decimal @default(0) @db.Decimal(10, 2)
+  grandTotal Decimal @default(0) @db.Decimal(10, 2)
+
+  tableId String
+  table   RestaurantTable @relation(fields: [tableId], references: [id])
+
+  createdById String
+  createdBy   User   @relation("OrdersCreatedBy", fields: [createdById], references: [id])
+
+  items   OrderItem[]
+  payment Payment?
+
+  acceptedAt  DateTime?
+  cookingAt   DateTime?
+  readyAt     DateTime?
+  servedAt    DateTime?
+  completedAt DateTime?
+  cancelledAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([tableId])
+  @@index([createdAt])
+}
+
+model OrderItem {
+  id       String @id @default(cuid())
+  quantity Int
+  /// Price snapshot at the time of ordering — menu price changes later must
+  /// never retroactively change a historical order's total.
+  unitPrice Decimal @db.Decimal(10, 2)
+  notes     String?
+
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  menuItemId String
+  menuItem   MenuItem @relation(fields: [menuItemId], references: [id])
+
+  createdAt DateTime @default(now())
+
+  @@index([orderId])
+  @@index([menuItemId])
+}
+
+model Payment {
+  id            String        @id @default(cuid())
+  orderId       String        @unique
+  order         Order         @relation(fields: [orderId], references: [id])
+  method        PaymentMethod
+  amountPaid    Decimal       @db.Decimal(10, 2)
+  createdAt     DateTime      @default(now())
+
+  @@index([createdAt])
+}

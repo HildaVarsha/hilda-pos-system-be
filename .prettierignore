@@ -1,0 +1,7 @@
+dist
+node_modules
+coverage
+uploads
+.env
+.env.*
+package-lock.json
