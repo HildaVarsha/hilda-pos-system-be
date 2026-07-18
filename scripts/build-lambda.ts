@@ -1,5 +1,8 @@
 import { execSync } from 'node:child_process';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+const OUTPUT_DIR = path.resolve('dist', 'lambdas', 'api-server');
 
 interface BuildStep {
   name: string;
@@ -8,8 +11,20 @@ interface BuildStep {
 
 const steps: BuildStep[] = [
   { name: 'Prisma Generate', command: 'prisma generate' },
-  { name: 'TypeScript Compilation', command: 'tsc -p tsconfig.lambda.json' },
-  { name: 'Path Alias Resolution', command: 'tsc-alias -p tsconfig.lambda.json' },
+  {
+    name: 'Bundle with esbuild',
+    command: [
+      'npx esbuild src/lambdas/api-server/index.ts',
+      '--bundle',
+      '--platform=node',
+      '--target=node20',
+      '--format=cjs',
+      `--outdir=${OUTPUT_DIR}`,
+      '--external:@prisma/client',
+      '--external:bcrypt',
+      '--external:socket.io',
+    ].join(' '),
+  },
 ];
 
 export async function buildLambda(): Promise<void> {
@@ -30,7 +45,7 @@ export async function buildLambda(): Promise<void> {
   }
 
   console.log('\n✅ Lambda build pipeline completed successfully');
-  console.log('   Output: dist/lambdas/api-server/\n');
+  console.log(`   Output: ${OUTPUT_DIR}\n`);
 }
 
 // Run directly when executed as a script

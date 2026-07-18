@@ -3,7 +3,7 @@ import { copyFile, mkdir, readdir, readFile, stat, writeFile } from 'node:fs/pro
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { createZipArchive, removeDirectory } from './utils/os.js';
+import { createZipArchive, isWindows, removeDirectory } from './utils/os.js';
 
 const LAYER_DIR = path.resolve('layers', 'dependencies', 'nodejs');
 const NODE_MODULES_DIR = path.join(LAYER_DIR, 'node_modules');
@@ -132,19 +132,12 @@ export async function buildLayer(): Promise<void> {
     const projectRoot = path.resolve('.');
 
     // Copy package.json with scripts stripped to avoid running lifecycle hooks (e.g. husky prepare)
-    // Also remove @prisma/client since the generated Prisma client is bundled with the
-    // Lambda function code (not the layer). This avoids pulling in prisma CLI, typescript,
-    // and effect as transitive dependencies (~200MB savings).
+    // Also remove "type": "module" so Lambda Layer packages (CJS) load correctly
     const pkgContent = await readFile(path.join(projectRoot, 'package.json'), 'utf-8');
     const pkg = JSON.parse(pkgContent) as Record<string, unknown>;
     delete pkg.scripts;
     delete pkg['lint-staged'];
-
-    // Remove @prisma/client — its generated runtime is included in the function code bundle
-    const deps = pkg.dependencies as Record<string, string> | undefined;
-    if (deps) {
-      delete deps['@prisma/client'];
-    }
+    delete pkg.type; // Layer packages are CJS — don't force ESM on them
 
     await writeFile(path.join(LAYER_DIR, 'package.json'), JSON.stringify(pkg, null, 2));
 
@@ -166,6 +159,40 @@ export async function buildLayer(): Promise<void> {
   } catch (error) {
     const reason = error instanceof Error ? error.message : 'Unknown error';
     console.error(`❌ Install Production Dependencies failed: ${reason}`);
+    process.exit(1);
+  }
+
+  // Step 3.1: Copy generated Prisma client into the layer's node_modules
+  // prisma generate outputs to the project root's node_modules/.prisma/client
+  // We copy it to the layer so the runtime can find the generated query engine
+  try {
+    const sourceGenerated = path.resolve('node_modules', '.prisma');
+    const destGenerated = path.join(NODE_MODULES_DIR, '.prisma');
+    await removeDirectory(destGenerated);
+    execSync(
+      isWindows()
+        ? `xcopy "${sourceGenerated}" "${destGenerated}" /E /I /Q /Y`
+        : `cp -r "${sourceGenerated}" "${destGenerated}"`,
+      { stdio: 'inherit' },
+    );
+    console.log('✅ Copy generated Prisma client to layer completed successfully');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`❌ Copy generated Prisma client failed: ${reason}`);
+    process.exit(1);
+  }
+
+  // Step 3.5: Remove heavy build-time-only transitive deps that @prisma/client pulls in
+  // These are only needed for prisma generate (build time), not Lambda runtime
+  try {
+    const buildOnlyPackages = ['prisma', 'typescript', 'effect', '@prisma/config', 'fast-check'];
+    for (const pkg of buildOnlyPackages) {
+      await removeDirectory(path.join(NODE_MODULES_DIR, pkg));
+    }
+    console.log('✅ Removed build-time-only transitive dependencies (prisma, typescript, effect)');
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : 'Unknown error';
+    console.error(`❌ Cleanup build-time dependencies failed: ${reason}`);
     process.exit(1);
   }
 
