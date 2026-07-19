@@ -34,44 +34,58 @@ export const billingService = {
     }
 
     const order = await this.getInvoice(orderId);
+
     if (order.payment) {
       throw ApiError.conflict('This order has already been paid');
     }
 
     const now = new Date();
-    const updatedOrder = await prisma.$transaction(async (tx) => {
-      await tx.payment.create({
-        data: {
-          order: { connect: { id: orderId } },
-          method: input.method,
-          amountPaid: order.grandTotal,
-        },
-      });
 
-      const updated = await tx.order.update({
-        where: { id: orderId },
-        data: { status: 'COMPLETED', servedAt: order.servedAt ?? now, completedAt: now },
-        include: {
-          table: true,
-          createdBy: { select: { id: true, name: true, email: true } },
-          items: { include: { menuItem: true } },
-          payment: true,
-        },
-      });
-
-      if (order.tableId) {
-        await tx.restaurantTable.update({
-          where: { id: order.tableId },
-          data: { status: 'AVAILABLE' },
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.payment.create({
+          data: {
+            order: { connect: { id: orderId } },
+            method: input.method,
+            amountPaid: order.grandTotal,
+          },
         });
-      }
 
-      return updated;
-    });
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: 'COMPLETED',
+            servedAt: order.servedAt ?? now,
+            completedAt: now,
+          },
+        });
 
+        if (order.tableId) {
+          await tx.restaurantTable.update({
+            where: { id: order.tableId },
+            data: {
+              status: 'AVAILABLE',
+            },
+          });
+        }
+      },
+      {
+        timeout: 15000,
+        maxWait: 10000,
+      },
+    );
+
+    // Fetch the complete order after the transaction commits
+    const updatedOrder = await this.getInvoice(orderId);
+
+    // Broadcast after transaction has completed
     broadcast(SOCKET_EVENTS.ORDER_COMPLETED, updatedOrder);
+
     if (order.tableId) {
-      broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: order.tableId, status: 'AVAILABLE' });
+      broadcast(SOCKET_EVENTS.TABLE_UPDATED, {
+        tableId: order.tableId,
+        status: 'AVAILABLE',
+      });
     }
 
     return updatedOrder;
