@@ -15,12 +15,12 @@ function broadcast(event: string, payload: unknown): void {
 
 export const billingService = {
   /** Read-only invoice preview — an order must be READY or SERVED to bill. */
-  async getInvoice(orderId: string): Promise<OrderWithRelations> {
+  async getInvoice(orderId: string, ignoreStatus?: boolean): Promise<OrderWithRelations> {
     const order = await orderRepository.findById(orderId);
     if (!order) {
       throw ApiError.notFound('Order not found');
     }
-    if (!['READY', 'SERVED'].includes(order.status)) {
+    if (!['READY', 'SERVED'].includes(order.status) && !ignoreStatus) {
       throw ApiError.conflict(
         `Cannot generate an invoice while the order is ${order.status}. It must be READY or SERVED first.`,
       );
@@ -76,7 +76,7 @@ export const billingService = {
     );
 
     // Fetch the complete order after the transaction commits
-    const updatedOrder = await this.getInvoice(orderId);
+    const updatedOrder = await this.getInvoice(orderId, true);
 
     // Broadcast after transaction has completed
     broadcast(SOCKET_EVENTS.ORDER_COMPLETED, updatedOrder);
