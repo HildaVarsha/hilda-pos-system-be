@@ -1,6 +1,10 @@
-import { Prisma } from '@prisma/client';
+import { OrderType, Prisma } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
-import { orderRepository, type OrderWithRelations } from '../repositories/order.repository.js';
+import {
+  orderInclude,
+  orderRepository,
+  type OrderWithRelations,
+} from '../repositories/order.repository.js';
 import { menuItemRepository } from '../repositories/menuItem.repository.js';
 import { tableRepository } from '../repositories/table.repository.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -24,7 +28,10 @@ function broadcast(event: string, payload: unknown): void {
 export const orderService = {
   async list(query: OrderListQuery): Promise<PaginatedResult<OrderWithRelations>> {
     const { skip, take } = toPrismaPagination(query);
-    const where = query.status ? { status: query.status } : undefined;
+    const where: Prisma.OrderWhereInput = {
+      ...(query.status ? { status: query.status } : {}),
+      ...(query.orderType ? { orderType: query.orderType } : {}),
+    };
 
     const [items, totalItems] = await Promise.all([
       orderRepository.findMany({ skip, take, where }),
@@ -47,14 +54,21 @@ export const orderService = {
    * separate "draft" state in this flow — a receptionist builds the cart
    * client-side and this single call both creates the order and fires
    * `order.created` for the Kitchen Display System).
+   *
+   * DINE_IN orders occupy a table for the duration of the order; PARCEL
+   * (takeaway) orders never touch table occupancy at all.
    */
   async create(input: CreateOrderInput, createdById: string): Promise<OrderWithRelations> {
-    const table = await tableRepository.findById(input.tableId);
-    if (!table) {
-      throw ApiError.badRequest('Selected table does not exist');
-    }
-    if (table.status === 'OCCUPIED') {
-      throw ApiError.conflict('This table already has an active order');
+    const isParcel = input.orderType === OrderType.PARCEL;
+
+    if (!isParcel && input.tableId) {
+      const table = await tableRepository.findById(input.tableId);
+      if (!table) {
+        throw ApiError.badRequest('Selected table does not exist');
+      }
+      if (table.status === 'OCCUPIED') {
+        throw ApiError.conflict('This table already has an active order');
+      }
     }
 
     const menuItemIds = input.items.map((item) => item.menuItemId);
@@ -90,29 +104,42 @@ export const orderService = {
     const taxAmount = subtotal.mul(env.TAX_RATE_PERCENT).div(100);
     const grandTotal = subtotal.add(taxAmount);
 
-    const [order] = await prisma.$transaction([
-      prisma.order.create({
-        data: {
-          table: { connect: { id: input.tableId } },
-          createdBy: { connect: { id: createdById } },
-          notes: input.notes,
-          subtotal,
-          taxAmount,
-          grandTotal,
-          items: { create: itemsCreateData },
-        },
-        include: {
-          table: true,
-          createdBy: { select: { id: true, name: true, email: true } },
-          items: { include: { menuItem: true } },
-          payment: true,
-        },
-      }),
-      prisma.restaurantTable.update({ where: { id: input.tableId }, data: { status: 'OCCUPIED' } }),
-    ]);
+    const order = await prisma.$transaction(
+      async (tx) => {
+        const created = await tx.order.create({
+          data: {
+            orderType: input.orderType,
+            customerName: input.customerName,
+            ...(isParcel ? {} : { table: { connect: { id: input.tableId as string } } }),
+            createdBy: { connect: { id: createdById } },
+            notes: input.notes,
+            subtotal,
+            taxAmount,
+            grandTotal,
+            items: { create: itemsCreateData },
+          },
+          include: orderInclude,
+        });
+
+        if (!isParcel && input.tableId) {
+          await tx.restaurantTable.update({
+            where: { id: input.tableId },
+            data: { status: 'OCCUPIED' },
+          });
+        }
+
+        return created;
+      },
+      {
+        maxWait: 10000,
+        timeout: 20000,
+      },
+    );
 
     broadcast(SOCKET_EVENTS.ORDER_CREATED, order);
-    broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: input.tableId, status: 'OCCUPIED' });
+    if (!isParcel && input.tableId) {
+      broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: input.tableId, status: 'OCCUPIED' });
+    }
 
     return order;
   },
@@ -123,25 +150,27 @@ export const orderService = {
       throw ApiError.conflict(`Order is already ${existing.status.toLowerCase()}`);
     }
 
-    const [order] = await prisma.$transaction([
-      prisma.order.update({
+    const order = await prisma.$transaction(async (tx) => {
+      const updated = await tx.order.update({
         where: { id },
         data: { status: 'CANCELLED', cancelledAt: new Date() },
-        include: {
-          table: true,
-          createdBy: { select: { id: true, name: true, email: true } },
-          items: { include: { menuItem: true } },
-          payment: true,
-        },
-      }),
-      prisma.restaurantTable.update({
-        where: { id: existing.tableId },
-        data: { status: 'AVAILABLE' },
-      }),
-    ]);
+        include: orderInclude,
+      });
+
+      if (existing.tableId) {
+        await tx.restaurantTable.update({
+          where: { id: existing.tableId },
+          data: { status: 'AVAILABLE' },
+        });
+      }
+
+      return updated;
+    });
 
     broadcast(SOCKET_EVENTS.ORDER_CANCELLED, order);
-    broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: existing.tableId, status: 'AVAILABLE' });
+    if (existing.tableId) {
+      broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: existing.tableId, status: 'AVAILABLE' });
+    }
 
     return order;
   },

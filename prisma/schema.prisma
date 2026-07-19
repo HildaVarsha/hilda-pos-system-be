@@ -35,6 +35,13 @@ enum TableStatus {
   RESERVED
 }
 
+/// DINE_IN orders require a table; PARCEL (takeaway) orders never touch
+/// table occupancy at all.
+enum OrderType {
+  DINE_IN
+  PARCEL
+}
+
 /// Order lifecycle. KITCHEN staff drive ACCEPTED -> COOKING -> READY.
 /// RECEPTIONIST/ADMIN drive SERVED -> COMPLETED (after billing).
 enum OrderStatus {
@@ -129,14 +136,22 @@ model Order {
   id          String      @id @default(cuid())
   orderNumber Int         @unique @default(autoincrement())
   status      OrderStatus @default(PENDING)
+  orderType   OrderType   @default(DINE_IN)
   notes       String?
+
+  /// Set for PARCEL orders so staff know who to hand the order to. Optional
+  /// for DINE_IN too (a receptionist may still want a name on file), but
+  /// never required — the table already identifies a dine-in order.
+  customerName String?
 
   subtotal   Decimal @default(0) @db.Decimal(10, 2)
   taxAmount  Decimal @default(0) @db.Decimal(10, 2)
   grandTotal Decimal @default(0) @db.Decimal(10, 2)
 
-  tableId String
-  table   RestaurantTable @relation(fields: [tableId], references: [id])
+  /// Null for PARCEL orders. Required (enforced in the validator/service,
+  /// not the DB) for DINE_IN orders.
+  tableId String?
+  table   RestaurantTable? @relation(fields: [tableId], references: [id])
 
   createdById String
   createdBy   User   @relation("OrdersCreatedBy", fields: [createdById], references: [id])
@@ -156,6 +171,7 @@ model Order {
 
   @@index([status])
   @@index([tableId])
+  @@index([orderType])
   @@index([createdAt])
 }
 
