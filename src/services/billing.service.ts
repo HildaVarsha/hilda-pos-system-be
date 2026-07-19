@@ -1,7 +1,6 @@
 import { PaymentMethod } from '@prisma/client';
 import { prisma } from '../config/prisma.js';
 import { orderRepository, type OrderWithRelations } from '../repositories/order.repository.js';
-import { paymentRepository } from '../repositories/payment.repository.js';
 import { ApiError } from '../utils/ApiError.js';
 import { getSocketServer, SOCKET_EVENTS } from '../socket/index.js';
 import type { CompletePaymentInput } from '../validators/billing.validator.js';
@@ -35,35 +34,59 @@ export const billingService = {
     }
 
     const order = await this.getInvoice(orderId);
+
     if (order.payment) {
       throw ApiError.conflict('This order has already been paid');
     }
 
     const now = new Date();
-    const [, updatedOrder] = await prisma.$transaction([
-      paymentRepository.create({
-        order: { connect: { id: orderId } },
-        method: input.method,
-        amountPaid: order.grandTotal,
-      }),
-      prisma.order.update({
-        where: { id: orderId },
-        data: { status: 'COMPLETED', servedAt: order.servedAt ?? now, completedAt: now },
-        include: {
-          table: true,
-          createdBy: { select: { id: true, name: true, email: true } },
-          items: { include: { menuItem: true } },
-          payment: true,
-        },
-      }),
-      prisma.restaurantTable.update({
-        where: { id: order.tableId },
-        data: { status: 'AVAILABLE' },
-      }),
-    ]);
 
+    await prisma.$transaction(
+      async (tx) => {
+        await tx.payment.create({
+          data: {
+            order: { connect: { id: orderId } },
+            method: input.method,
+            amountPaid: order.grandTotal,
+          },
+        });
+
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: 'COMPLETED',
+            servedAt: order.servedAt ?? now,
+            completedAt: now,
+          },
+        });
+
+        if (order.tableId) {
+          await tx.restaurantTable.update({
+            where: { id: order.tableId },
+            data: {
+              status: 'AVAILABLE',
+            },
+          });
+        }
+      },
+      {
+        timeout: 15000,
+        maxWait: 10000,
+      },
+    );
+
+    // Fetch the complete order after the transaction commits
+    const updatedOrder = await this.getInvoice(orderId);
+
+    // Broadcast after transaction has completed
     broadcast(SOCKET_EVENTS.ORDER_COMPLETED, updatedOrder);
-    broadcast(SOCKET_EVENTS.TABLE_UPDATED, { tableId: order.tableId, status: 'AVAILABLE' });
+
+    if (order.tableId) {
+      broadcast(SOCKET_EVENTS.TABLE_UPDATED, {
+        tableId: order.tableId,
+        status: 'AVAILABLE',
+      });
+    }
 
     return updatedOrder;
   },

@@ -10,7 +10,7 @@ dotenv.config();
  */
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
-  PORT: z.coerce.number().int().positive().default(8000),
+  PORT: z.coerce.number().int().positive().default(4000),
 
   DATABASE_URL: z.string().url(),
 
@@ -34,7 +34,7 @@ const envSchema = z.object({
 
   RESTAURANT_OPEN_HOUR: z.coerce.number().int().min(0).max(23).default(12),
   RESTAURANT_CLOSE_HOUR: z.coerce.number().int().min(0).max(23).default(23),
-  TAX_RATE_PERCENT: z.coerce.number().min(0).max(100).default(5),
+  TAX_RATE_PERCENT: z.coerce.number().min(0).max(100).default(20),
 });
 
 function loadEnv() {
